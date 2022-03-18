@@ -4,7 +4,7 @@
 #include <eosio/eosio.hpp>
 
 #include <string>
-#define hodl_symbol symbol("NEWTESTEST", 0)
+#define hodl_symbol symbol("TEST", 0)
 namespace eosiosystem {
    class system_contract;
 }
