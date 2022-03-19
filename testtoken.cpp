@@ -8,9 +8,8 @@ ACTION testtoken :: deposit(name hodler, asset quantity, string memo)
       return;
    }
 
-   check(quantity.amount == 300, "You must deposit 300 tokens");
+   check(quantity.amount > 0, "You must deposit at leat 1 tokens");
    check(quantity.symbol == hodl_symbol, "These are not the droids you are looking for.");
-   transfer(hodler, get_self(), quantity, "Depsit 300 tokens to Contract address"); 
    balance_table balance(get_self(), hodler.value);
    auto hodl_it = balance.find(hodl_symbol.raw());
    auto itr = balance.find(get_self().value);
@@ -26,6 +25,7 @@ ACTION testtoken :: deposit(name hodler, asset quantity, string memo)
          row.funds = quantity;
    });
 }
+
 ACTION testtoken :: withdraw(name to, asset quantity, string memo)
 {
    if (to == get_self())
@@ -33,15 +33,11 @@ ACTION testtoken :: withdraw(name to, asset quantity, string memo)
       print("These are not the droids you are looking for.");
       return;
    }
-
-   check(quantity.amount != 400, "Error");
-   check(quantity.amount == 200, "You must withdraw 200 tokens");
+   check(quantity.amount > 0, "Error, you must withdraw at least 1 tokens");
    check(quantity.symbol == hodl_symbol, "These are not the droids you are looking for.");
-   transfer(get_self(),to , quantity, "Withdraw 200 tokens to user"); 
    balance_table balance(get_self(), to.value);
    auto hodl_it = balance.find(hodl_symbol.raw());
    auto itr = balance.find(to.value);
-
    if (itr != balance.end()) {
       balance.modify(hodl_it, get_self(), [&](auto &row) {
          row.user = to;
@@ -50,79 +46,82 @@ ACTION testtoken :: withdraw(name to, asset quantity, string memo)
    }
    
 }
+ACTION testtoken::create(name issuer, asset maximum_supply, bool transfer_locked) {
 
-ACTION testtoken::create() {
-     require_auth(get_self());
+   require_auth(get_self());
 
-     auto sym = symbol("TEST", 0); 
-     auto maximum_supply = asset(5000, sym);
+   auto sym = maximum_supply.symbol;
+   check(sym.is_valid(), "ERR::CREATE_INVALID_SYMBOL::invalid symbol name");
+   check(maximum_supply.is_valid(), "ERR::CREATE_INVALID_SUPPLY::invalid supply");
+   check(maximum_supply.amount > 0, "ERR::CREATE_MAX_SUPPLY_MUST_BE_POSITIVE::max-supply must be positive");
 
-     stats statstable(get_self(), sym.code().raw());
-     auto existing = statstable.find(sym.code().raw());
-     check(existing == statstable.end(), "token with symbol already created");
+   stats statstable(_self, sym.code().raw());
+   auto  existing = statstable.find(sym.code().raw());
+   check(existing == statstable.end(), "ERR::CREATE_EXISITNG_SYMBOL::token with symbol already exists");
 
-     statstable.emplace(get_self(), [&](auto &s) {
-        s.supply.symbol = sym;
-        s.max_supply = maximum_supply;
-        s.issuer = get_self();
-     });
+   statstable.emplace(_self, [&](auto &s) {
+      s.supply.symbol   = maximum_supply.symbol;
+      s.max_supply      = maximum_supply;
+      s.issuer          = issuer;
+      s.transfer_locked = transfer_locked;
+   });
 }
 
 
-ACTION testtoken::mine(const asset &quantity, const string &memo) {
-     require_auth(get_self());
-   //   asset &quantity = asset(100.0000, "TEST"); 
-     auto sym = quantity.symbol;
-     auto NEWTESTsym_code = symbol("TEST", 0);
-     check(sym.code() == NEWTESTsym_code.code(), "This contract can handle NEWTEST tokens only.");
-     check(sym.is_valid(), "invalid symbol name");
-     check(memo.size() <= 256, "memo has more than 256 bytes");
+void testtoken::mine(name to, asset quantity, string memo) {
+   auto sym = quantity.symbol;
+   check(sym.is_valid(), "ERR::ISSUE_INVALID_SYMBOL::invalid symbol name");
+   auto  sym_name = sym.code().raw();
+   stats statstable(_self, sym_name);
+   auto  existing = statstable.find(sym_name);
+   check(existing != statstable.end(),
+      "ERR::ISSUE_NON_EXISTING_SYMBOL::token with symbol does not exist, create token before issue");
+   const auto &st = *existing;
 
-     stats statstable(get_self(), sym.code().raw());
-     auto existing = statstable.find(sym.code().raw());
-     check(existing != statstable.end(), "token with symbol does not exist, create token before issue");
+   require_auth(st.issuer);
+   check(quantity.is_valid(), "ERR::ISSUE_INVALID_QUANTITY::invalid quantity");
+   check(quantity.amount > 0, "ERR::ISSUE_NON_POSITIVE::must issue positive quantity");
 
-     const auto& existing_token = *existing;
-     require_auth( existing_token.issuer );
+   check(quantity.symbol == st.supply.symbol, "ERR::ISSUE_INVALID_PRECISION::symbol precision mismatch");
+   check(quantity.amount <= st.max_supply.amount - st.supply.amount,
+      "ERR::ISSUE_QTY_EXCEED_SUPPLY::quantity exceeds available supply");
 
-     check(quantity.is_valid(), "invalid quantity");
-     check(quantity.amount == 100, "Must be 100 tokens");
-     check(quantity.symbol == existing_token.supply.symbol, "symbol precision mismatch");
-     statstable.modify(existing_token, same_payer, [&](auto &s) {
-        s.supply += quantity;
-     });
+   statstable.modify(st, same_payer, [&](auto &s) {
+      s.supply += quantity;
+   });
 
-     add_balance(existing_token.issuer, quantity, existing_token.issuer);
-  }
+   add_balance(st.issuer, quantity, st.issuer);
 
-ACTION testtoken::transfer(const name &from,
-                       const name &to,
-                       const asset &quantity,
-                       const string &memo) {
-   check(from != to, "cannot transfer to self");
+   if (to != st.issuer) {
+      SEND_INLINE_ACTION(*this, transfer, {st.issuer, "active"_n}, {st.issuer, to, quantity, memo});
+   }
+}
+
+ACTION testtoken::transfer(name from, name to, asset quantity, string memo) {
+   check(from != to, "ERR::TRANSFER_TO_SELF::cannot transfer to self");
    require_auth(from);
-   check(is_account(to), "to account does not exist");
-   auto sym = quantity.symbol.code();
+   check(is_account(to), "ERR::TRANSFER_NONEXISTING_DESTN::to account does not exist");
 
-   auto NEWTESTsym_code = symbol("TEST", 0); 
-   check(sym == NEWTESTsym_code.code(), "This contract can handle NEWTEST tokens only.");
-   stats statstable(get_self(), sym.raw());
+   auto        sym = quantity.symbol.code();
+   stats       statstable(_self, sym.raw());
    const auto &st = statstable.get(sym.raw());
 
-   require_recipient(from);
-   require_recipient(to);
+   if (st.transfer_locked) {
+      check(has_auth(st.issuer), "Transfer is locked, need issuer permission");
+   }
 
-   check(quantity.is_valid(), "invalid quantity");
-   check(quantity.amount > 0, "must transfer positive quantity");
-   check(quantity.symbol == st.supply.symbol, "symbol precision mismatch");
-   check(memo.size() <= 256, "memo has more than 256 bytes");
+   require_recipient(from, to);
+
+   check(quantity.is_valid(), "ERR::TRANSFER_INVALID_QTY::invalid quantity");
+   check(quantity.amount > 0, "ERR::TRANSFER_NON_POSITIVE_QTY::must transfer positive quantity");
+   check(quantity.symbol == st.supply.symbol, "ERR::TRANSFER_SYMBOL_MISMATCH::symbol precision mismatch");
+   check(memo.size() <= 256, "ERR::TRANSFER_MEMO_TOO_LONG::memo has more than 256 bytes");
 
    auto payer = has_auth(to) ? to : from;
 
    sub_balance(from, quantity);
    add_balance(to, quantity, payer);
 }
-
 void testtoken::sub_balance( const name& owner, const asset& value ) {
    accounts from_acnts( get_self(), owner.value );
 
